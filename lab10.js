@@ -60,7 +60,7 @@ const Lab10={
   const matched=this.matching(receipt.nums,actual.nums),total=receipt.sum===actual.sum;
   return {state:'compared',actual,matched,total,combo:matched===3,label:(total?'Trùng tổng':'Khác tổng')+' · trùng '+matched+'/3 số (không xét thứ tự)'};
  },
- showError(message){const el=document.getElementById('archiveMessage');if(el){el.textContent=message;el.className='warning';}},
+ showError(message){this.message=message;const el=document.getElementById('archiveMessage');if(el){el.textContent=message;el.className='warning';}},
  async boot(){
   try{
    await this.open();
@@ -90,10 +90,11 @@ const Lab10={
    const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),25000);
    let res;try{res=await fetch('/api/checkpoint',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:this.clientId,base_id:candidate.base_id,nums:candidate.nums}),signal:ctrl.signal});}finally{clearTimeout(timer)}
    const receipt=await res.json();if(!res.ok)throw Error(receipt.error||'Máy chủ từ chối lưu');
-   if(receipt.nums?.join(',')!==candidate.nums.join(',')||receipt.base_id!==candidate.base_id)throw Error('Máy chủ đã có gợi ý khác cho kỳ này. Không ghi đè.');
-   if(!/^\d{7,10}$/.test(receipt.target_id)||Number(receipt.target_id)!==Number(receipt.base_id)+1||receipt.sum!==candidate.nums.reduce((a,b)=>a+b,0)||!Number.isFinite(Date.parse(receipt.saved_at)))throw Error('Biên nhận không hợp lệ');
+   if(receipt.base_id!==candidate.base_id)throw Error('Mốc biên nhận đã thay đổi. Cập nhật nguồn rồi thử lại.');
+   const recovered=receipt.nums?.join(',')!==candidate.nums.join(',');
+   if(!/^\d{7,10}$/.test(receipt.target_id)||Number(receipt.target_id)!==Number(receipt.base_id)+1||!Array.isArray(receipt.nums)||receipt.nums.length!==3||receipt.nums.some(n=>!Number.isInteger(n)||n<1||n>6)||receipt.sum!==receipt.nums.reduce((a,b)=>a+b,0)||!Number.isFinite(Date.parse(receipt.saved_at)))throw Error('Biên nhận không hợp lệ');
    await new Promise((resolve,reject)=>{const tx=this.db.transaction('receipts','readwrite');tx.objectStore('receipts').add(receipt);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(Error('Kỳ này đã có gợi ý khóa hoặc không đủ chỗ lưu'));});
-   await this.read();this.showError('Đã khóa gợi ý cho kỳ #'+receipt.target_id+' theo giờ máy chủ. Nguồn chưa xác minh giờ quay.');
+   await this.read();this.showError((recovered?'Đã lấy lại gợi ý máy chủ đã khóa trước đó cho kỳ #':'Đã khóa gợi ý cho kỳ #')+receipt.target_id+' theo giờ máy chủ. Nguồn chưa xác minh giờ quay.');
   }catch(e){this.showError(e.name==='AbortError'?'Lưu quá thời gian. Có thể máy chủ đã nhận; thử lại với cùng bộ số để lấy biên nhận.':e.message);}
   finally{this.busy=false;this.render();}
  },
@@ -135,11 +136,11 @@ const Lab10={
   const evaluated=this.receipts.map(r=>({r,o:this.outcome(r,current)})),done=evaluated.filter(x=>x.o.state==='compared');
   document.getElementById('reviewSummary').textContent=`${this.receipts.length} gợi ý khóa · ${done.length} đã có kết quả · ${evaluated.filter(x=>x.o.state==='pending').length} đang chờ/thiếu · ${done.filter(x=>x.o.total).length} trùng tổng · ${done.filter(x=>x.o.combo).length} trùng đủ bộ số (không xét thứ tự). Các đối chiếu đều chưa xác minh giờ quay; không tính là thành tích dự báo đã kiểm chứng.`;
   document.getElementById('reviewRows').innerHTML=evaluated.slice(0,100).map(({r,o})=>`<tr><td>#${esc(r.target_id)}<small style="display:block">${esc(new Date(r.saved_at).toLocaleString('vi-VN'))}</small></td><td>${r.nums.join('–')}<small style="display:block">Tổng ${r.sum}</small></td><td>${o.actual?o.actual.nums.join('–')+' · '+o.actual.sum:'—'}</td><td>${esc(o.label)}<small style="display:block">${r.imported?'Từ sao lưu · ':''}Chưa xác minh giờ quay</small></td></tr>`).join('')||'<tr><td colspan="4">Chưa lưu gợi ý. Tạo gợi ý rồi nhấn Lưu và khóa.</td></tr>';
-  const lock=document.getElementById('lockSuggestion'),target=feed?.pending_id,already=this.receipts.some(r=>r.target_id===target);
+  const lock=document.getElementById('lockSuggestion'),target=feed?.pending_id,locked=this.receipts.find(r=>r.target_id===target),already=!!locked;
   lock.disabled=this.busy||!!this.storageError||!this.persistent||!this.candidate||!this.candidate.base_id||!feed||feed.status!=='ok'||!target||already;
   document.getElementById('randomize').disabled=this.busy;
   lock.textContent=this.busy?'Đang lưu…':already?'Đã khóa kỳ #'+target:'Lưu và khóa gợi ý';
-  document.getElementById('lockHint').textContent=target?'Kỳ nguồn đang chờ: #'+target+'. Mỗi thiết bị chỉ khóa một gợi ý cho mỗi kỳ. Máy chủ ghi nhận thời điểm; chưa xác minh lưu trước giờ quay thực tế.':'Chưa xác định kỳ đang chờ từ nguồn; tạm chưa thể khóa gợi ý.';
+  document.getElementById('lockHint').textContent=(locked?'Gợi ý đã khóa cho #'+target+': '+locked.nums.join(' – ')+' · Tổng '+locked.sum+'. Gợi ý ngẫu nhiên đang xem không thay đổi bản đã khóa. ':target?'Kỳ nguồn đang chờ: #'+target+'. Mỗi thiết bị chỉ khóa một gợi ý cho mỗi kỳ. ':'Chưa xác định kỳ đang chờ từ nguồn; tạm chưa thể khóa gợi ý. ')+'Chưa xác minh lưu trước giờ quay thực tế.'+(this.message?' '+this.message:'');
   document.getElementById('backupArchive').disabled=!this.persistent;
  }
 };
