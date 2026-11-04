@@ -2,7 +2,7 @@
 """Bingo18 research proxy. Run: python server.py. Requires requests and beautifulsoup4.
 No claim of affiliation with data publishers. Respect access permissions/rate limits.
 """
-import json, re, time, threading, datetime, os
+import json, re, time, threading, datetime, os, hashlib, secrets
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,8 +14,10 @@ SOURCES = [
  'https://xosominhngoc.net.vn/bingo18',
  'https://xosominhngoc.net.vn/kqxs-bingo18',
 ]
-_CACHE = {'rows': [], 'fetched_at': None, 'source': None, 'error': 'Chưa kết nối nguồn', 'last_attempt': 0}
+_CACHE = {'rows': [], 'fetched_at': None, 'source': None, 'error': 'Chưa kết nối nguồn', 'last_attempt': 0, 'pending_id': None, 'latest_changed_at': None, 'source_checks': {}, 'conflicts': []}
 _LOCK = threading.Lock()
+_REFRESH_LOCK = threading.Lock()
+_RECEIPTS = {}
 TIMEOUT = 16
 INTERVAL = 90
 
@@ -62,6 +64,27 @@ def parse_results(html):
         dedup[id_]={'id':id_.zfill(7),'date':date,'nums':nums,'sum':sum(nums),'source':'Xổ Số Minh Ngọc'}
     return sorted(dedup.values(),key=lambda r:int(r['id']),reverse=True)
 
+def source_checks(html):
+    soup = BeautifulSoup(html, 'html.parser')
+    counts = {'cards': 0, 'incomplete': 0, 'invalid': 0, 'duplicates': 0}
+    seen = set(); pending = []
+    for card in soup.select('article.vkt-bingo18'):
+        label = card.select_one('.vk-kyve')
+        m = re.search(r'#\s*(\d{5,10})', label.get_text(' ', strip=True)) if label else None
+        if not m: continue
+        counts['cards'] += 1
+        id_ = m.group(1).zfill(7)
+        if id_ in seen: counts['duplicates'] += 1
+        seen.add(id_)
+        balls = card.select('.vk-bong li') or card.select('.vk-chuoi .kq')
+        values = [b.get_text(strip=True) for b in balls]
+        if len(values) != 3 or any(not v for v in values):
+            counts['incomplete'] += 1
+            if 'vk-tt' in card.get('class', []): pending.append(id_)
+        elif any(not re.fullmatch('[1-6]', v) for v in values): counts['invalid'] += 1
+    counts['pending_id'] = max(pending, key=int) if pending else None
+    return counts
+
 def fetch_live():
     errors=[]
     for url in SOURCES:
@@ -70,30 +93,74 @@ def fetch_live():
             resp.raise_for_status()
             rows=parse_results(resp.text)
             if not rows: raise ValueError('Không tìm được kỳ quay và 3 số hợp lệ trên trang; có thể website đã đổi cấu trúc hoặc tải nội dung bằng JavaScript')
-            return rows,url,None
+            return rows,url,None,source_checks(resp.text)
         except Exception as e: errors.append(type(e).__name__+': '+str(e)[:170])
-    return None,None,' | '.join(errors)
+    return None,None,' | '.join(errors),{}
+
+def utcnow():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 def refresh(force=False):
-    now=time.time()
+    # One source request at a time; even forced checks respect publisher rate limits.
+    with _REFRESH_LOCK:
+        now=time.time()
+        with _LOCK:
+            if now-_CACHE['last_attempt']<INTERVAL: return dict(_CACHE)
+            _CACHE['last_attempt']=now
+        rows,url,error,checks=fetch_live()
+        with _LOCK:
+            if rows is not None:
+                existing={r['id']:r for r in _CACHE['rows']}
+                previous=max(existing, key=int) if existing else None
+                conflicts=[]
+                for r in rows:
+                    old=existing.get(r['id'])
+                    if old and (old['nums']!=r['nums'] or (old['date'] and r['date'] and old['date']!=r['date'])):
+                        conflicts.append(r['id'])
+                    else: existing[r['id']]=r
+                if conflicts: error='Kết quả mâu thuẫn, giữ nguyên bản đã lưu: '+', '.join(conflicts[:6])
+                _CACHE['conflicts']=sorted(set(_CACHE['conflicts']+conflicts))
+                _CACHE['rows']=sorted(existing.values(),key=lambda r:int(r['id']),reverse=True)
+                stamp=utcnow()
+                if _CACHE['rows'] and _CACHE['rows'][0]['id']!=previous: _CACHE['latest_changed_at']=stamp
+                _CACHE['fetched_at']=stamp
+                _CACHE['source']=url
+                _CACHE['source_checks']=checks
+                _CACHE['pending_id']=checks.get('pending_id')
+            _CACHE['error']=error
+            return dict(_CACHE)
+
+def results_payload():
+    state=refresh(); rows=state['rows']
+    return {
+        'status':'ok' if state['error'] is None else ('stale' if rows else 'unavailable'),
+        'server_at':utcnow(), 'fetched_at':state['fetched_at'], 'source_url':state['source'],
+        'last_attempt':datetime.datetime.fromtimestamp(state['last_attempt'],datetime.timezone.utc).isoformat(),
+        'latest_changed_at':state['latest_changed_at'], 'pending_id':state['pending_id'],
+        'source_checks':state['source_checks'], 'conflicts':state['conflicts'],
+        'error':state['error'], 'count':len(rows),'rows':rows[:500],
+        'notice':'Lịch sử lâu dài lưu trên trình duyệt của từng thiết bị. Nguồn chưa cung cấp giờ quay đã xác minh.'}
+
+def make_receipt(body):
+    nums=body.get('nums'); client=body.get('client_id','')
+    if not isinstance(client,str) or not re.fullmatch(r'[a-f0-9]{32}',client): raise ValueError('Thiếu mã thiết bị hợp lệ')
+    if not isinstance(nums,list) or len(nums)!=3 or any(type(n) is not int or n<1 or n>6 for n in nums): raise ValueError('Ba số phải là số nguyên 1–6')
+    state=refresh()
     with _LOCK:
-        if now-_CACHE['last_attempt']<INTERVAL: return dict(_CACHE)
-        _CACHE['last_attempt']=now
-    rows,url,error=fetch_live()
-    with _LOCK:
-        if rows is not None:
-            existing={r['id']:r for r in _CACHE['rows']}
-            conflicts=[]
-            for r in rows:
-                old=existing.get(r['id'])
-                if old and old['nums']!=r['nums']: conflicts.append(r['id'])
-                else: existing[r['id']]=r
-            if conflicts: error='Mã kỳ có kết quả khác dữ liệu đã lưu: '+', '.join(conflicts[:6])+'. Không ghi đè các kỳ này.'
-            _CACHE['rows']=sorted(existing.values(),key=lambda r:int(r['id']),reverse=True)[:2000]
-            _CACHE['fetched_at']=datetime.datetime.now(datetime.timezone.utc).isoformat()
-            _CACHE['source']=url
-        _CACHE['error']=error
-        return dict(_CACHE)
+        if state['error'] or not state['rows'] or not state['fetched_at']: raise ValueError('Nguồn lỗi; chưa thể khóa gợi ý')
+        if (datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(state['fetched_at'])).total_seconds()>180: raise ValueError('Nguồn chưa được kiểm tra gần đây')
+        base=state['rows'][0]['id']; target=state['pending_id']
+        if body.get('base_id')!=base: raise ValueError('Mốc kỳ đã thay đổi; cập nhật rồi tạo lại gợi ý')
+        if not target or int(target)!=int(base)+1: raise ValueError('Nguồn chưa công bố kỳ đang chờ kế tiếp; chưa khóa gợi ý')
+        if target in {r['id'] for r in state['rows']}: raise ValueError('Kỳ này đã có kết quả')
+        key=client+':'+target
+        if key in _RECEIPTS: return dict(_RECEIPTS[key])
+        receipt={'target_id':target,'base_id':base,'nums':nums,'sum':sum(nums),'saved_at':utcnow(),
+            'source_checked_at':state['fetched_at'],'source_url':state['source'],
+            'timing_status':'unverified','nonce':secrets.token_hex(12)}
+        receipt['fingerprint']=hashlib.sha256(json.dumps(receipt,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        _RECEIPTS[key]=receipt
+        return dict(receipt)
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*args,**kwargs): super().__init__(*args,directory=str(ROOT),**kwargs)
@@ -103,15 +170,25 @@ class Handler(SimpleHTTPRequestHandler):
             raw=b'{"ok":true}'
             self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
         elif path=='/api/results':
-            state=refresh(); rows=state['rows'];payload={
-                'status': 'ok' if state['error'] is None else ('stale' if rows else 'unavailable'),
-                'fetched_at':state['fetched_at'],'source_url':state['source'],
-                'last_attempt': datetime.datetime.fromtimestamp(state['last_attempt'],datetime.timezone.utc).isoformat(),
-                'error':state['error'], 'count':len(rows),'rows':rows[:500],
-                'notice':'Dữ liệu từ website bên thứ ba; độ trễ có thể cao hơn lịch quay. Không phải API chính thức của Vietlott.'}
-            raw=json.dumps(payload,ensure_ascii=False).encode('utf-8')
-            self.send_response(200);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+            self.send_json(results_payload())
         else: super().do_GET()
+    def send_json(self,payload,status=200):
+        raw=json.dumps(payload,ensure_ascii=False).encode('utf-8')
+        self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+    def do_POST(self):
+        if urlparse(self.path).path!='/api/checkpoint': return self.send_json({'error':'Không tìm thấy'},404)
+        # Only this app may submit suggestions. No cross-origin write access.
+        origin=self.headers.get('Origin','')
+        if not origin or urlparse(origin).netloc != self.headers.get('Host'): return self.send_json({'error':'Nguồn yêu cầu không hợp lệ'},403)
+        try:
+            length=int(self.headers.get('Content-Length','0'))
+            if not 0<length<=4096: raise ValueError('Nội dung quá lớn hoặc trống')
+            body=json.loads(self.rfile.read(length))
+            if not isinstance(body,dict): raise ValueError('Dữ liệu không hợp lệ')
+            self.send_json(make_receipt(body))
+        except (ValueError,TypeError) as e: self.send_json({'error':str(e)},409)
+        except Exception: self.send_json({'error':'Không thể lưu mốc lúc này; vui lòng thử lại'},503)
+
 
 def main():
     import argparse
