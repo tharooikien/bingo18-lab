@@ -21,10 +21,25 @@ INTERVAL = 90
 
 def parse_results(html):
     soup = BeautifulSoup(html, 'html.parser')
-    for node in soup(['script', 'style', 'nav', 'footer', 'header']): node.decompose()
+    rows = []
+    # Read each result card before removing its header (draw ID and date live there).
+    for card in soup.select('article.vkt-bingo18'):
+        label = card.select_one('.vk-kyve')
+        match = re.search(r'#\s*(\d{5,10})', label.get_text(' ', strip=True)) if label else None
+        balls = [n.get_text(strip=True) for n in card.select('.vk-bong li')]
+        if not balls:
+            balls = [n.get_text(strip=True) for n in card.select('.vk-chuoi .kq')]
+        if not match or len(balls) != 3 or any(not re.fullmatch('[1-6]', n) for n in balls):
+            continue
+        date_match = re.search(r'\d{2}/\d{2}/\d{4}', card.get_text(' ', strip=True))
+        nums = [int(n) for n in balls]
+        total_match = re.search(r'Tổng\s*3\s*số\s*:\s*(\d+)', card.get_text(' ', strip=True), re.I)
+        if total_match and int(total_match.group(1)) != sum(nums):
+            raise ValueError('Tổng trên trang nguồn không khớp ba số')
+        rows.append((match.group(1), date_match.group(0) if date_match else '', nums))
+    for node in soup(['script', 'style', 'nav', 'footer']): node.decompose()
     text = soup.get_text(' ', strip=True)
     text = re.sub(r'\s+', ' ', text)
-    rows = []
     # The older Minh Ngoc HTML presents each draw as 'Ky QSMT #.... - Ngay ... 6 3 6'.
     pat1 = re.compile(r'Kỳ\s*QSMT\s*:\s*#?\s*(\d{5,10})\s*-\s*Ngày\s*:\s*(\d{2}/\d{2}/\d{4})\s+([1-6])\s+([1-6])\s+([1-6])(?=\s|$)', re.I)
     for m in pat1.finditer(text):
