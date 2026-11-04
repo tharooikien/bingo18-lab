@@ -11,8 +11,8 @@ from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parent
 SOURCES = [
- 'https://xosominhngoc.net.vn/kqxs-bingo18',
  'https://xosominhngoc.net.vn/bingo18',
+ 'https://xosominhngoc.net.vn/kqxs-bingo18',
 ]
 _CACHE = {'rows': [], 'fetched_at': None, 'source': None, 'error': 'Chưa kết nối nguồn', 'last_attempt': 0}
 _LOCK = threading.Lock()
