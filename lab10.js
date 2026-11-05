@@ -13,7 +13,8 @@ const Lab10={
  async all(name){return new Promise((resolve,reject)=>{const tx=this.db.transaction(name,'readonly'),r=tx.objectStore(name).getAll();let values;r.onsuccess=()=>{values=r.result};tx.oncomplete=()=>resolve(values);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||Error('Không đọc được kho'));});},
  async getMeta(key){const rows=await this.all('meta');return rows.find(r=>r.key===key)?.value;},
  async setMeta(key,value){return new Promise((resolve,reject)=>{const tx=this.db.transaction('meta','readwrite');tx.objectStore('meta').put({key,value});tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||Error('Không lưu được'));});},
- valid(r){return r&&/^\d{5,10}$/.test(String(r.id))&&Array.isArray(r.nums)&&r.nums.length===3&&r.nums.every(n=>Number.isInteger(n)&&n>=1&&n<=6)&&r.sum===r.nums.reduce((a,b)=>a+b,0)&&typeof r.date==='string'&&(!r.date||/^\d{2}\/\d{2}\/\d{4}$/.test(r.date));},
+ validDate(s){if(!s)return true;const m=/^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);if(!m)return false;const d=new Date(Date.UTC(+m[3],+m[2]-1,+m[1]));return d.getUTCFullYear()===+m[3]&&d.getUTCMonth()===+m[2]-1&&d.getUTCDate()===+m[1]},
+ valid(r){return r&&/^\d{5,10}$/.test(String(r.id))&&Array.isArray(r.nums)&&r.nums.length===3&&r.nums.every(n=>Number.isInteger(n)&&n>=1&&n<=6)&&r.sum===r.nums.reduce((a,b)=>a+b,0)&&typeof r.date==='string'&&this.validDate(r.date);},
  canonical(r){return {id:String(Number(r.id)).padStart(7,'0'),date:r.date||'',nums:[...r.nums],sum:r.sum,source:typeof r.source==='string'?r.source:'Xổ Số Minh Ngọc'};},
  same(a,b){return a.nums.join(',')===b.nums.join(',')&&(!a.date||!b.date||a.date===b.date);},
  async merge(rows, imported=false){
