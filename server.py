@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
+import xsmt
 
 ROOT = Path(__file__).resolve().parent
 SOURCES = [
@@ -171,6 +172,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
         elif path=='/api/results':
             self.send_json(results_payload())
+        elif path=='/api/xsmt':
+            self.send_json(xsmt.payload())
         else: super().do_GET()
     def send_json(self,payload,status=200):
         raw=json.dumps(payload,ensure_ascii=False).encode('utf-8')
