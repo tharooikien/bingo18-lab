@@ -1,6 +1,6 @@
 """Read public Central Vietnam result tables for descriptive research.
 
-Only the last two digits of a province's six-digit special prize are analyzed.
+The two-digit eighth prize and the last two digits of the special prize are analyzed.
 The publisher's statistics endpoints are deliberately not queried.
 """
 import datetime
@@ -28,7 +28,7 @@ _refresh_lock = threading.Lock()
 
 
 def parse_page(html):
-    """Return complete date/province/special-prize observations; ignore partial draws."""
+    """Return complete date/province/prize observations; ignore partial draws."""
     soup = BeautifulSoup(html, 'html.parser')
     results = {}
     for table in soup.select('table.kqxs_content'):
@@ -64,9 +64,9 @@ def parse_page(html):
                 continue
             key = (date, code)
             row = {'date': date, 'province': code, 'name': PROVINCES[code],
-                   'special': numbers[0], 'tail': numbers[0][-2:]}
-            if key in results and results[key]['special'] != row['special']:
-                raise ValueError('Mâu thuẫn giải đặc biệt cùng ngày và đài')
+                   'eighth': eighth_numbers[0], 'special': numbers[0], 'tail': numbers[0][-2:]}
+            if key in results and any(results[key][field] != row[field] for field in ('special', 'eighth')):
+                raise ValueError('Mâu thuẫn giải tám/đặc biệt cùng ngày và đài')
             results[key] = row
     return sorted(results.values(), key=lambda r: (datetime.datetime.strptime(r['date'], '%d/%m/%Y'), r['province']), reverse=True)
 
@@ -78,7 +78,7 @@ def _fetch(weekday):
     response.raise_for_status()
     rows = parse_page(response.text)
     if not rows:
-        raise ValueError('Không đọc được giải đặc biệt đã hoàn thành')
+        raise ValueError('Không đọc được giải tám và đặc biệt đã hoàn thành')
     return url, rows
 
 
@@ -99,7 +99,7 @@ def payload():
                         url, rows = future.result()
                         for row in rows:
                             key = (row['date'], row['province'])
-                            if key in incoming and incoming[key]['special'] != row['special']:
+                            if key in incoming and any(incoming[key][field] != row[field] for field in ('special', 'eighth')):
                                 raise ValueError('Mâu thuẫn kết quả giữa các trang')
                             incoming[key] = row
                         ok.append(url)
@@ -109,7 +109,7 @@ def payload():
                 if incoming:
                     existing = {(r['date'], r['province']): r for r in _cache['rows']}
                     for key, row in incoming.items():
-                        if key in existing and existing[key]['special'] != row['special']:
+                        if key in existing and any(existing[key][field] != row[field] for field in ('special', 'eighth')):
                             errors.append(key[0] + ' ' + key[1] + ': dữ liệu thay đổi')
                         else:
                             existing[key] = row
@@ -124,4 +124,4 @@ def payload():
             'fetched_at': state['fetched_at'], 'source_url': BASE,
             'sources_ok': state['sources_ok'], 'sources_expected': len(WEEKDAYS),
             'error': state['error'], 'rows': state['rows'],
-            'notice': 'Hai số cuối giải đặc biệt theo từng đài; tần suất mẫu không phải xác suất dự đoán.'}
+            'notice': 'Giải tám và hai số cuối giải đặc biệt theo từng đài; ước lượng từ mẫu chưa được kiểm định, không phải xác suất trúng đã chứng minh.'}
